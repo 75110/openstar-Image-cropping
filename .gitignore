@@ -1,7 +1,11 @@
 /target
 **/*.rs.bk
-Cargo.lock
 .idea
 .vscode
 *.pdb
 *.exe
+
+# 脚本与冗余配置文件
+package.json
+*.bat
+*.ps1
