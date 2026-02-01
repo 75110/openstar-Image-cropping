@@ -1,8 +1,31 @@
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use serde::Deserialize;
 
 use crate::icons::{icon, icon_text};
 use crate::image_splitter::{ImageSplitter, SplitConfig};
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LineType {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum UpdateStatus {
+    Idle,
+    Checking,
+    NewVersion(String, String), // version, download_url
+    UpToDate,
+    Error(String),
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+}
 
 pub struct BatchImageSplitterApp {
     // 图片列表
@@ -42,12 +65,9 @@ pub struct BatchImageSplitterApp {
     obfuscated_info_url: String,
     obfuscated_repo_label: String,
     obfuscated_repo_url: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum LineType {
-    Horizontal,
-    Vertical,
+    
+    // 更新状态
+    update_status: Arc<Mutex<UpdateStatus>>,
 }
 
 // 简单的 XOR 混淆/解密函数
@@ -106,6 +126,7 @@ impl BatchImageSplitterApp {
             obfuscated_info_url: info2,
             obfuscated_repo_label: repo_label,
             obfuscated_repo_url: repo_url,
+            update_status: Arc::new(Mutex::new(UpdateStatus::Idle)),
         }
     }
 
@@ -218,6 +239,70 @@ impl BatchImageSplitterApp {
                 }
             });
         }
+    }
+
+    fn check_for_updates(&self, ctx: egui::Context) {
+        let repo_url = self.obfuscated_repo_url.clone();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let update_status = self.update_status.clone();
+        
+        // 设置状态为正在检查
+        {
+            if let Ok(mut status) = update_status.lock() {
+                *status = UpdateStatus::Checking;
+            }
+        }
+
+        // 转换 GitHub URL 到 API URL
+        let api_url = if repo_url.starts_with("http") {
+            repo_url.replace("github.com", "api.github.com/repos")
+        } else {
+            format!("https://{}", repo_url.replace("github.com", "api.github.com/repos"))
+        } + "/releases/latest";
+
+        std::thread::spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(10))
+                .build();
+            
+            let result = (|| -> Result<UpdateStatus, String> {
+                let response = match agent.get(&api_url)
+                    .set("User-Agent", "BatchImageSplitter-UpdateChecker")
+                    .call() {
+                        Ok(resp) => resp,
+                        Err(ureq::Error::Status(404, _)) => {
+                            // 404 通常意味着没有 release
+                            return Ok(UpdateStatus::UpToDate);
+                        }
+                        Err(e) => return Err(format!("网络请求失败: {}", e)),
+                    };
+                
+                let release = response.into_json::<GithubRelease>()
+                    .map_err(|e| format!("解析响应失败: {}", e))?;
+                
+                let latest_tag = release.tag_name.trim_start_matches('v');
+                let current_tag = current_version.trim_start_matches('v');
+                
+                match (semver::Version::parse(latest_tag), semver::Version::parse(current_tag)) {
+                    (Ok(latest), Ok(current)) => {
+                        if latest > current {
+                            Ok(UpdateStatus::NewVersion(release.tag_name, release.html_url))
+                        } else {
+                            Ok(UpdateStatus::UpToDate)
+                        }
+                    }
+                    _ => Err(format!("版本解析失败: {} vs {}", latest_tag, current_tag)),
+                }
+            })();
+
+            if let Ok(mut status) = update_status.lock() {
+                match result {
+                    Ok(new_status) => *status = new_status,
+                    Err(e) => *status = UpdateStatus::Error(e),
+                }
+            }
+            ctx.request_repaint();
+        });
     }
 }
 
@@ -720,7 +805,7 @@ impl eframe::App for BatchImageSplitterApp {
                         }
                         ui.add_space(16.0);
                         ui.label(egui::RichText::new("批量图片分割工具").size(22.0).strong().color(egui::Color32::from_rgb(19, 78, 74))); // #134e4a
-                        ui.label(egui::RichText::new("v2.0.0").size(13.0).color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new("v1.2").size(13.0).color(egui::Color32::GRAY));
                         ui.add_space(20.0);
                         
                         // 自定义颜色的分割线
@@ -764,9 +849,64 @@ impl eframe::App for BatchImageSplitterApp {
                              );
                          });
                          ui.add_space(24.0);
-                        if ui.button(egui::RichText::new("知道了").strong()).clicked() {
-                            self.show_about = false;
-                        }
+                         ui.horizontal(|ui| {
+                             ui.style_mut().spacing.item_spacing.x = 12.0;
+                             
+                             let status = if let Ok(s) = self.update_status.lock() {
+                                 s.clone()
+                             } else {
+                                 UpdateStatus::Idle
+                             };
+
+                             match status {
+                                 UpdateStatus::Idle => {
+                                     let check_btn = ui.add_sized(
+                                         [120.0, 32.0],
+                                         egui::Button::new(egui::RichText::new("检查更新").strong())
+                                             .fill(egui::Color32::WHITE)
+                                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(19, 78, 74)))
+                                             .rounding(6.0)
+                                     );
+                                     if check_btn.clicked() {
+                                         self.check_for_updates(ui.ctx().clone());
+                                     }
+                                 }
+                                 UpdateStatus::Checking => {
+                                     ui.add_sized([120.0, 32.0], egui::Spinner::new());
+                                     ui.label("正在检查...");
+                                 }
+                                 UpdateStatus::NewVersion(version, url) => {
+                                     let download_btn = ui.add_sized(
+                                         [120.0, 32.0],
+                                         egui::Button::new(egui::RichText::new(format!("下载 {}", version)).strong())
+                                             .fill(egui::Color32::from_rgb(19, 78, 74))
+                                             .rounding(6.0)
+                                     );
+                                     if download_btn.clicked() {
+                                         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                     }
+                                     ui.label(egui::RichText::new("发现新版本！").color(egui::Color32::from_rgb(19, 78, 74)));
+                                 }
+                                 UpdateStatus::UpToDate => {
+                                     ui.add_sized([120.0, 32.0], egui::Button::new("已是最新").sense(egui::Sense::hover()));
+                                     if ui.button("重新检查").clicked() {
+                                         self.check_for_updates(ui.ctx().clone());
+                                     }
+                                 }
+                                 UpdateStatus::Error(e) => {
+                                     if ui.add_sized([120.0, 32.0], egui::Button::new("检查失败").rounding(6.0)).clicked() {
+                                         self.check_for_updates(ui.ctx().clone());
+                                     }
+                                     ui.label(egui::RichText::new(e).size(10.0).color(egui::Color32::RED));
+                                 }
+                             }
+
+                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                 if ui.add_sized([80.0, 32.0], egui::Button::new(egui::RichText::new("知道了").strong()).rounding(6.0)).clicked() {
+                                     self.show_about = false;
+                                 }
+                             });
+                         });
                         ui.add_space(16.0);
                     });
                 });
