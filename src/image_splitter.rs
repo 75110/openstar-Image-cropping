@@ -107,7 +107,8 @@ impl ImageSplitter {
     /// 批量处理图片
     pub fn batch_process(
         image_paths: &[PathBuf],
-        config: &SplitConfig,
+        global_config: &SplitConfig,
+        overrides: &std::collections::HashMap<usize, SplitConfig>,
         output_dir: &Path,
         progress_callback: impl Fn(usize, usize) + Sync,
     ) -> anyhow::Result<(usize, usize)> {
@@ -121,6 +122,7 @@ impl ImageSplitter {
         let failed = std::sync::atomic::AtomicUsize::new(0);
 
         image_paths.par_iter().enumerate().for_each(|(idx, path)| {
+            let config = overrides.get(&idx).unwrap_or(global_config);
             let result = Self::process_single_image(path, config, output_dir);
 
             if result.is_ok() {

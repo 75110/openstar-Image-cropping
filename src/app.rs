@@ -40,6 +40,12 @@ pub struct BatchImageSplitterApp {
     config: SplitConfig,
     saved_config: Option<SplitConfig>,
     
+    // 每张图片的独立配置覆盖 (索引 -> 配置)
+    config_overrides: std::collections::HashMap<usize, SplitConfig>,
+    
+    // 缩略图缓存
+    thumbnails: std::collections::HashMap<usize, egui::TextureHandle>,
+    
     // 交互状态
     selected_lines: Vec<(LineType, usize)>, // (类型, 索引)
     dragging_line: Option<(LineType, usize)>,
@@ -110,6 +116,8 @@ impl BatchImageSplitterApp {
             current_image: None,
             config: SplitConfig::new(1, 1),
             saved_config: None,
+            config_overrides: std::collections::HashMap::new(),
+            thumbnails: std::collections::HashMap::new(),
             selected_lines: Vec::new(),
             dragging_line: None,
             is_selecting: false,
@@ -128,6 +136,149 @@ impl BatchImageSplitterApp {
             obfuscated_repo_url: repo_url,
             update_status: Arc::new(Mutex::new(UpdateStatus::Idle)),
         }
+    }
+
+    fn add_line(&mut self, line_type: LineType, pos: f32) {
+        // 如果当前图片有独立配置，则修改独立配置；否则修改全局配置
+        if let Some(config) = self.config_overrides.get_mut(&self.current_index) {
+            match line_type {
+                LineType::Horizontal => {
+                    config.h_lines.push(pos);
+                    config.h_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    config.rows = config.h_lines.len() + 1;
+                    if let Some(idx) = config.h_lines.iter().position(|&p| p == pos) {
+                        self.selected_lines.clear();
+                        self.selected_lines.push((LineType::Horizontal, idx));
+                    }
+                }
+                LineType::Vertical => {
+                    config.v_lines.push(pos);
+                    config.v_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    config.cols = config.v_lines.len() + 1;
+                    if let Some(idx) = config.v_lines.iter().position(|&p| p == pos) {
+                        self.selected_lines.clear();
+                        self.selected_lines.push((LineType::Vertical, idx));
+                    }
+                }
+            }
+        } else {
+            // 修改全局配置
+            match line_type {
+                LineType::Horizontal => {
+                    self.config.h_lines.push(pos);
+                    self.config.h_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    self.config.rows = self.config.h_lines.len() + 1;
+                    if let Some(idx) = self.config.h_lines.iter().position(|&p| p == pos) {
+                        self.selected_lines.clear();
+                        self.selected_lines.push((LineType::Horizontal, idx));
+                    }
+                }
+                LineType::Vertical => {
+                    self.config.v_lines.push(pos);
+                    self.config.v_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    self.config.cols = self.config.v_lines.len() + 1;
+                    if let Some(idx) = self.config.v_lines.iter().position(|&p| p == pos) {
+                        self.selected_lines.clear();
+                        self.selected_lines.push((LineType::Vertical, idx));
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_ruler(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        vertical: bool,
+    ) -> egui::Response {
+        let response = ui.interact(rect, ui.id().with(if vertical { "left_ruler" } else { "top_ruler" }), egui::Sense::click());
+        
+        let painter = ui.painter();
+        
+        // 绘制背景
+        painter.rect_filled(
+            rect,
+            2.0,
+            egui::Color32::from_rgb(229, 231, 235), // Gray 200
+        );
+        
+        // 绘制边框
+        painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(209, 213, 219)), // Gray 300
+        );
+
+        let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(107, 114, 128)); // Gray 500
+        
+        if vertical {
+            // 左侧尺子 (垂直)
+            let x = rect.right() - 2.0;
+            for i in 0..=10 {
+                let p = i as f32 / 10.0;
+                let y = rect.top() + rect.height() * p;
+                let len = if i % 5 == 0 { 12.0 } else { 6.0 };
+                painter.line_segment(
+                    [egui::pos2(x - len, y), egui::pos2(x, y)],
+                    stroke,
+                );
+                
+                if i % 5 == 0 {
+                    let text = format!("{}%", i * 10);
+                    painter.text(
+                        egui::pos2(x - 14.0, y),
+                        egui::Align2::RIGHT_CENTER,
+                        text,
+                        egui::FontId::proportional(8.0),
+                        egui::Color32::from_rgb(107, 114, 128),
+                    );
+                }
+            }
+        } else {
+            // 顶部尺子 (水平)
+            let y = rect.bottom() - 2.0;
+            for i in 0..=10 {
+                let p = i as f32 / 10.0;
+                let x = rect.left() + rect.width() * p;
+                let len = if i % 5 == 0 { 12.0 } else { 6.0 };
+                painter.line_segment(
+                    [egui::pos2(x, y - len), egui::pos2(x, y)],
+                    stroke,
+                );
+                
+                if i % 5 == 0 {
+                    let text = format!("{}%", i * 10);
+                    painter.text(
+                        egui::pos2(x, y - 14.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        text,
+                        egui::FontId::proportional(8.0),
+                        egui::Color32::from_rgb(107, 114, 128),
+                    );
+                }
+            }
+        }
+        
+        // 鼠标悬停时的指示器
+        if let Some(pos) = ui.ctx().pointer_latest_pos() {
+            if rect.contains(pos) {
+                let color = egui::Color32::from_rgb(19, 78, 74).linear_multiply(0.5);
+                if vertical {
+                    painter.line_segment(
+                        [egui::pos2(rect.left(), pos.y), egui::pos2(rect.right(), pos.y)],
+                        egui::Stroke::new(1.0, color),
+                    );
+                } else {
+                    painter.line_segment(
+                        [egui::pos2(pos.x, rect.top()), egui::pos2(pos.x, rect.bottom())],
+                        egui::Stroke::new(1.0, color),
+                    );
+                }
+            }
+        }
+        
+        response
     }
 
     fn load_about_icon(&mut self, ctx: &egui::Context) {
@@ -222,11 +373,12 @@ impl BatchImageSplitterApp {
 
         // 在主线程中打开文件对话框
         if let Some(output_dir) = rfd::FileDialog::new().pick_folder() {
-            let config = self.saved_config.clone().unwrap_or_else(|| self.config.clone());
+            let global_config = self.saved_config.clone().unwrap_or_else(|| self.config.clone());
+            let overrides = self.config_overrides.clone();
             let paths = self.image_paths.clone();
 
             std::thread::spawn(move || {
-                match ImageSplitter::batch_process(&paths, &config, &output_dir, |current, total| {
+                match ImageSplitter::batch_process(&paths, &global_config, &overrides, &output_dir, |current, total| {
                     let progress = current as f32 / total as f32;
                     println!("进度: {:.1}%", progress * 100.0);
                 }) {
@@ -337,10 +489,14 @@ impl eframe::App for BatchImageSplitterApp {
         let mut should_open = false;
         let mut should_save = false;
         let mut should_process = false;
+        let mut should_delete = false;
         let mut h_adjust: Vec<(usize, f32)> = Vec::new();
         let mut v_adjust: Vec<(usize, f32)> = Vec::new();
         
         ctx.input(|i| {
+            if i.key_pressed(egui::Key::Delete) {
+                should_delete = true;
+            }
             if i.modifiers.ctrl {
                 if i.key_pressed(egui::Key::ArrowLeft) { should_prev = true; }
                 if i.key_pressed(egui::Key::ArrowRight) { should_next = true; }
@@ -380,14 +536,55 @@ impl eframe::App for BatchImageSplitterApp {
         if should_save { self.save_config(); }
         if should_process { self.start_batch_process(); }
         
+        if should_delete && !self.selected_lines.is_empty() {
+            // 根据是否有独立配置来选择配置源
+            if let Some(config) = self.config_overrides.get_mut(&self.current_index) {
+                // 修改独立配置
+                let mut h_to_delete: Vec<usize> = self.selected_lines.iter()
+                    .filter(|(t, _)| *t == LineType::Horizontal)
+                    .map(|(_, i)| *i).collect();
+                h_to_delete.sort_by(|a, b| b.cmp(a));
+                let mut v_to_delete: Vec<usize> = self.selected_lines.iter()
+                    .filter(|(t, _)| *t == LineType::Vertical)
+                    .map(|(_, i)| *i).collect();
+                v_to_delete.sort_by(|a, b| b.cmp(a));
+                for idx in h_to_delete { if idx < config.h_lines.len() { config.h_lines.remove(idx); } }
+                config.rows = config.h_lines.len() + 1;
+                for idx in v_to_delete { if idx < config.v_lines.len() { config.v_lines.remove(idx); } }
+                config.cols = config.v_lines.len() + 1;
+                self.status_message = "已删除选中分割线 (独立配置)".to_string();
+            } else {
+                // 修改全局配置
+                let mut h_to_delete: Vec<usize> = self.selected_lines.iter()
+                    .filter(|(t, _)| *t == LineType::Horizontal)
+                    .map(|(_, i)| *i).collect();
+                h_to_delete.sort_by(|a, b| b.cmp(a));
+                let mut v_to_delete: Vec<usize> = self.selected_lines.iter()
+                    .filter(|(t, _)| *t == LineType::Vertical)
+                    .map(|(_, i)| *i).collect();
+                v_to_delete.sort_by(|a, b| b.cmp(a));
+                for idx in h_to_delete { if idx < self.config.h_lines.len() { self.config.h_lines.remove(idx); } }
+                self.config.rows = self.config.h_lines.len() + 1;
+                for idx in v_to_delete { if idx < self.config.v_lines.len() { self.config.v_lines.remove(idx); } }
+                self.config.cols = self.config.v_lines.len() + 1;
+                self.status_message = "已删除选中分割线 (共享配置已同步)".to_string();
+            }
+            self.selected_lines.clear();
+        }
+        
+        // 微调逻辑
         for (index, delta) in h_adjust {
-            if let Some(line) = self.config.h_lines.get_mut(index) {
-                *line = (*line + delta).max(0.0).min(1.0);
+            if let Some(config) = self.config_overrides.get_mut(&self.current_index) {
+                if let Some(line) = config.h_lines.get_mut(index) { *line = (*line + delta).max(0.0).min(1.0); }
+            } else {
+                if let Some(line) = self.config.h_lines.get_mut(index) { *line = (*line + delta).max(0.0).min(1.0); }
             }
         }
         for (index, delta) in v_adjust {
-            if let Some(line) = self.config.v_lines.get_mut(index) {
-                *line = (*line + delta).max(0.0).min(1.0);
+            if let Some(config) = self.config_overrides.get_mut(&self.current_index) {
+                if let Some(line) = config.v_lines.get_mut(index) { *line = (*line + delta).max(0.0).min(1.0); }
+            } else {
+                if let Some(line) = self.config.v_lines.get_mut(index) { *line = (*line + delta).max(0.0).min(1.0); }
             }
         }
 
@@ -596,6 +793,7 @@ impl eframe::App for BatchImageSplitterApp {
                     ui.label(egui::RichText::new("• Ctrl + S: 保存当前分割线配置").size(11.5).color(hint_color));
                     ui.label(egui::RichText::new("• Ctrl + Enter: 开始批量处理").size(11.5).color(hint_color));
                     ui.label(egui::RichText::new("• Ctrl + ← / →: 上一张 / 下一张").size(11.5).color(hint_color));
+                    ui.label(egui::RichText::new("• Delete: 删除选中的分割线").size(11.5).color(hint_color));
                     ui.label(egui::RichText::new("• 方向键: 微调选中分割线 (加Shift加速)").size(11.5).color(hint_color));
                     
                     ui.add_space(12.0);
@@ -621,39 +819,206 @@ impl eframe::App for BatchImageSplitterApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ctx.style().as_ref()).fill(egui::Color32::from_rgb(243, 244, 246))) // 浅色背景
             .show(ctx, |ui| {
-                ui.centered_and_justified(|ui| {
-                    if let Some(texture) = &self.current_texture {
-                        let available_size = ui.available_size();
+                if let Some(texture) = self.current_texture.clone() {
+                    let total_available = ui.available_rect_before_wrap();
+                    
+                    // 划分 2/3 和 1/3
+                    let main_height = total_available.height() * 0.7;
+                    
+                    let main_rect = egui::Rect::from_min_max(
+                        total_available.min,
+                        egui::pos2(total_available.max.x, total_available.min.y + main_height)
+                    );
+                    
+                    let gallery_rect = egui::Rect::from_min_max(
+                        egui::pos2(total_available.min.x, total_available.min.y + main_height),
+                        total_available.max
+                    );
+
+                    // --- 主预览区域 (main_rect) ---
+                    ui.allocate_ui_at_rect(main_rect, |ui| {
                         let texture_size = texture.size_vec2();
                         
-                        let scale = (available_size.x / texture_size.x)
-                            .min(available_size.y / texture_size.y);
+                        // 预留尺子空间
+                        let ruler_size = 24.0;
+                        let content_rect = ui.available_rect_before_wrap().shrink2(egui::vec2(ruler_size + 10.0, ruler_size + 10.0));
+                        
+                        let scale = (content_rect.width() / texture_size.x)
+                            .min(content_rect.height() / texture_size.y);
                         let display_size = texture_size * scale;
                         self.image_display_scale = scale;
 
                         let image_rect = egui::Rect::from_center_size(
-                            ui.available_rect_before_wrap().center(),
+                            content_rect.center(),
                             display_size,
                         );
+                        self.image_rect = Some(image_rect);
 
-                        let response = ui.add(
-                            egui::Image::new(texture)
+                        // 获取当前配置的副本以避免借用冲突
+                        let current_config = self.config_overrides.get(&self.current_index).cloned().unwrap_or_else(|| self.config.clone());
+
+                        // 1. 绘制顶部尺子
+                        let top_ruler_rect = egui::Rect::from_min_max(
+                            egui::pos2(image_rect.left(), image_rect.top() - ruler_size - 4.0),
+                            egui::pos2(image_rect.right(), image_rect.top() - 4.0)
+                        );
+                        let top_resp = self.draw_ruler(ui, top_ruler_rect, false);
+                        if top_resp.clicked() {
+                            if let Some(pos) = top_resp.interact_pointer_pos() {
+                                let rel_x = (pos.x - image_rect.left()) / image_rect.width();
+                                self.add_line(LineType::Vertical, rel_x);
+                            }
+                        }
+
+                        // 2. 绘制左侧尺子
+                        let left_ruler_rect = egui::Rect::from_min_max(
+                            egui::pos2(image_rect.left() - ruler_size - 4.0, image_rect.top()),
+                            egui::pos2(image_rect.left() - 4.0, image_rect.bottom())
+                        );
+                        let left_resp = self.draw_ruler(ui, left_ruler_rect, true);
+                        if left_resp.clicked() {
+                            if let Some(pos) = left_resp.interact_pointer_pos() {
+                                let rel_y = (pos.y - image_rect.top()) / image_rect.height();
+                                self.add_line(LineType::Horizontal, rel_y);
+                            }
+                        }
+
+                        // 3. 绘制图片
+                        let response = ui.put(
+                            image_rect,
+                            egui::Image::new(&texture)
                                 .fit_to_exact_size(display_size)
                                 .sense(egui::Sense::click_and_drag()),
                         );
 
-                        self.image_rect = Some(image_rect);
-
-                        // 处理框选
+                        // 处理拖拽分割线
                         if let Some(rect) = self.image_rect {
                             if response.drag_started() {
                                 if let Some(pointer_pos) = response.interact_pointer_pos() {
-                                    self.is_selecting = true;
-                                    self.selection_start = Some(pointer_pos);
-                                    self.selection_end = self.selection_start;
-                                    if !ui.input(|i| i.modifiers.shift) {
-                                        self.selected_lines.clear();
+                                    // 检查是否点击了已有的分割线
+                                    let mut found_line = None;
+                                    
+                                    // 检查水平线
+                                    for (i, &pos) in current_config.h_lines.iter().enumerate() {
+                                        let y = rect.top() + rect.height() * pos;
+                                        if (pointer_pos.y - y).abs() < 5.0 {
+                                            found_line = Some((LineType::Horizontal, i));
+                                            break;
+                                        }
                                     }
+                                    
+                                    // 如果没找到水平线，检查垂直线
+                                    if found_line.is_none() {
+                                        for (i, &pos) in current_config.v_lines.iter().enumerate() {
+                                            let x = rect.left() + rect.width() * pos;
+                                            if (pointer_pos.x - x).abs() < 5.0 {
+                                                found_line = Some((LineType::Vertical, i));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if let Some(line_key) = found_line {
+                                        self.dragging_line = Some(line_key);
+                                        // 确保拖拽的线被选中
+                                        if !self.selected_lines.contains(&line_key) {
+                                            if !ui.input(|i| i.modifiers.shift) {
+                                                self.selected_lines.clear();
+                                            }
+                                            self.selected_lines.push(line_key);
+                                        }
+                                    } else {
+                                        // 如果没点到线，则是框选逻辑
+                                        self.is_selecting = true;
+                                        self.selection_start = Some(pointer_pos);
+                                        self.selection_end = self.selection_start;
+                                        if !ui.input(|i| i.modifiers.shift) {
+                                            self.selected_lines.clear();
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if let Some((line_type, line_idx)) = self.dragging_line {
+                                if let Some(pointer_pos) = response.interact_pointer_pos() {
+                                    // 只要开始拖拽，就自动创建独立配置（如果还没有的话）
+                                    let config = self.config_overrides.entry(self.current_index)
+                                        .or_insert_with(|| self.config.clone());
+                                    
+                                    match line_type {
+                                        LineType::Horizontal => {
+                                            if line_idx < config.h_lines.len() {
+                                                let new_pos = ((pointer_pos.y - rect.top()) / rect.height()).max(0.0).min(1.0);
+                                                config.h_lines[line_idx] = new_pos;
+                                                // 注意：这里不排序，否则索引会乱。排序应该在拖拽结束时进行。
+                                            }
+                                        }
+                                        LineType::Vertical => {
+                                            if line_idx < config.v_lines.len() {
+                                                let new_pos = ((pointer_pos.x - rect.left()) / rect.width()).max(0.0).min(1.0);
+                                                config.v_lines[line_idx] = new_pos;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if response.drag_stopped() {
+                                if let Some((line_type, _)) = self.dragging_line {
+                                    // 拖拽结束，进行排序并重新计算行列
+                                    if let Some(config) = self.config_overrides.get_mut(&self.current_index) {
+                                        match line_type {
+                                            LineType::Horizontal => {
+                                                config.h_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                                config.rows = config.h_lines.len() + 1;
+                                            }
+                                            LineType::Vertical => {
+                                                config.v_lines.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                                config.cols = config.v_lines.len() + 1;
+                                            }
+                                        }
+                                    }
+                                    self.dragging_line = None;
+                                    self.selected_lines.clear(); // 拖拽结束后清除选中，或者保留？通常保留更好，但为了简单先清除
+                                }
+                                
+                                if self.is_selecting {
+                                    if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+                                        let selection_rect = egui::Rect::from_two_pos(start, end);
+                                        
+                                        // 检查水平分割线
+                                        for (i, &pos) in current_config.h_lines.iter().enumerate() {
+                                            let y = rect.top() + rect.height() * pos;
+                                            let line_rect = egui::Rect::from_min_max(
+                                                egui::pos2(rect.left(), y - 3.0),
+                                                egui::pos2(rect.right(), y + 3.0)
+                                            );
+                                            if selection_rect.intersects(line_rect) {
+                                                let line_key = (LineType::Horizontal, i);
+                                                if !self.selected_lines.contains(&line_key) {
+                                                    self.selected_lines.push(line_key);
+                                                }
+                                            }
+                                        }
+                                        
+                                        // 检查垂直分割线
+                                        for (i, &pos) in current_config.v_lines.iter().enumerate() {
+                                            let x = rect.left() + rect.width() * pos;
+                                            let line_rect = egui::Rect::from_min_max(
+                                                egui::pos2(x - 3.0, rect.top()),
+                                                egui::pos2(x + 3.0, rect.bottom())
+                                            );
+                                            if selection_rect.intersects(line_rect) {
+                                                let line_key = (LineType::Vertical, i);
+                                                if !self.selected_lines.contains(&line_key) {
+                                                    self.selected_lines.push(line_key);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    self.is_selecting = false;
+                                    self.selection_start = None;
+                                    self.selection_end = None;
                                 }
                             }
                             
@@ -662,45 +1027,6 @@ impl eframe::App for BatchImageSplitterApp {
                                     self.selection_end = Some(pointer_pos);
                                 }
                             }
-                            
-                            if response.drag_stopped() && self.is_selecting {
-                                if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
-                                    let selection_rect = egui::Rect::from_two_pos(start, end);
-                                    
-                                    // 检查水平分割线
-                                    for (i, &pos) in self.config.h_lines.iter().enumerate() {
-                                        let y = rect.top() + rect.height() * pos;
-                                        let line_rect = egui::Rect::from_min_max(
-                                            egui::pos2(rect.left(), y - 3.0),
-                                            egui::pos2(rect.right(), y + 3.0)
-                                        );
-                                        if selection_rect.intersects(line_rect) {
-                                            let line_key = (LineType::Horizontal, i);
-                                            if !self.selected_lines.contains(&line_key) {
-                                                self.selected_lines.push(line_key);
-                                            }
-                                        }
-                                    }
-                                    
-                                    // 检查垂直分割线
-                                    for (i, &pos) in self.config.v_lines.iter().enumerate() {
-                                        let x = rect.left() + rect.width() * pos;
-                                        let line_rect = egui::Rect::from_min_max(
-                                            egui::pos2(x - 3.0, rect.top()),
-                                            egui::pos2(x + 3.0, rect.bottom())
-                                        );
-                                        if selection_rect.intersects(line_rect) {
-                                            let line_key = (LineType::Vertical, i);
-                                            if !self.selected_lines.contains(&line_key) {
-                                                self.selected_lines.push(line_key);
-                                            }
-                                        }
-                                    }
-                                }
-                                self.is_selecting = false;
-                                self.selection_start = None;
-                                self.selection_end = None;
-                            }
                         }
 
                         // 绘制分割线
@@ -708,7 +1034,7 @@ impl eframe::App for BatchImageSplitterApp {
                             let painter = ui.painter();
                             
                             // 水平分割线
-                            for (i, &pos) in self.config.h_lines.iter().enumerate() {
+                            for (i, &pos) in current_config.h_lines.iter().enumerate() {
                                 let y = rect.top() + rect.height() * pos;
                                 let is_selected = self.selected_lines.contains(&(LineType::Horizontal, i));
                                 let is_dragging = self.dragging_line == Some((LineType::Horizontal, i));
@@ -732,7 +1058,7 @@ impl eframe::App for BatchImageSplitterApp {
                             }
 
                             // 垂直分割线
-                            for (i, &pos) in self.config.v_lines.iter().enumerate() {
+                            for (i, &pos) in current_config.v_lines.iter().enumerate() {
                                 let x = rect.left() + rect.width() * pos;
                                 let is_selected = self.selected_lines.contains(&(LineType::Vertical, i));
                                 let is_dragging = self.dragging_line == Some((LineType::Vertical, i));
@@ -772,6 +1098,112 @@ impl eframe::App for BatchImageSplitterApp {
                                 }
                             }
                         }
+                    });
+
+                    // --- 底部缩略图列表 (gallery_rect) ---
+                    ui.allocate_ui_at_rect(gallery_rect, |ui| {
+                        ui.set_clip_rect(gallery_rect);
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(229, 231, 235)) // Gray 200
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                egui::ScrollArea::horizontal()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let image_paths = self.image_paths.clone();
+                                            for (idx, path) in image_paths.iter().enumerate() {
+                                                // 尝试加载缩略图
+                                                let texture = {
+                                                    let t = self.thumbnails.entry(idx).or_insert_with(|| {
+                                                        match ImageSplitter::open_image(path) {
+                                                            Ok(img) => {
+                                                                // 使用更高的分辨率以支持缩放
+                                                                let thumb = img.thumbnail(512, 512);
+                                                                let size = [thumb.width() as usize, thumb.height() as usize];
+                                                                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, thumb.to_rgba8().as_raw());
+                                                                ui.ctx().load_texture(format!("thumb_{}", idx), color_image, egui::TextureOptions::default())
+                                                            }
+                                                            Err(_) => {
+                                                                // 加载失败时使用默认空纹理或错误提示
+                                                                ui.ctx().load_texture(format!("thumb_err_{}", idx), egui::ColorImage::example(), egui::TextureOptions::default())
+                                                            }
+                                                        }
+                                                    });
+                                                    t.clone()
+                                                };
+
+                                                let is_selected = idx == self.current_index;
+                                                let border_color = if is_selected {
+                                                    egui::Color32::from_rgb(19, 78, 74) // 主题色
+                                                } else {
+                                                    egui::Color32::TRANSPARENT
+                                                };
+
+                                                let has_override = self.config_overrides.contains_key(&idx);
+
+                                                ui.vertical(|ui| {
+                                                    // 动态计算缩略图尺寸：基于区域高度，预留空间给标签
+                                                    let thumb_height = (gallery_rect.height() - 60.0).max(120.0);
+                                                    let frame_size = egui::vec2(thumb_height, thumb_height);
+                                                     let inner_res = egui::Frame::none()
+                                                         .stroke(egui::Stroke::new(2.0, border_color))
+                                                         .rounding(4.0)
+                                                         .inner_margin(2.0)
+                                                         .show(ui, |ui| {
+                                                             ui.add(egui::Image::new(&texture).fit_to_exact_size(frame_size))
+                                                         });
+                                                     let rect = inner_res.response.rect;
+                                                     let resp = ui.interact(rect, ui.id().with(idx), egui::Sense::click());
+
+                                                     // 在缩略图上绘制分割线预览
+                                                     let painter = ui.painter();
+                                                    let thumb_config = self.config_overrides.get(&idx).unwrap_or(&self.config);
+                                                    
+                                                    // 缩略图中的分割线颜色稍微淡一点
+                                                    let line_color = egui::Color32::from_rgba_premultiplied(239, 68, 68, 200); // 红色，透明度略低
+                                                    let line_stroke = egui::Stroke::new(2.0, line_color);
+
+                                                    for &pos in &thumb_config.h_lines {
+                                                        let y = rect.top() + rect.height() * pos;
+                                                        painter.line_segment(
+                                                            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                                                            line_stroke,
+                                                        );
+                                                    }
+                                                    for &pos in &thumb_config.v_lines {
+                                                        let x = rect.left() + rect.width() * pos;
+                                                        painter.line_segment(
+                                                            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                                                            line_stroke,
+                                                        );
+                                                    }
+
+                                                    if resp.clicked() {
+                                                        self.current_index = idx;
+                                                        self.load_image(ui.ctx(), &path.clone());
+                                                    }
+
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(2.0);
+                                                        if has_override {
+                                                            ui.label(egui::RichText::new("已调").size(12.0).color(egui::Color32::from_rgb(34, 197, 94)));
+                                                        } else {
+                                                            ui.label(egui::RichText::new("共享").size(12.0).color(egui::Color32::from_rgb(107, 114, 128)));
+                                                        }
+                                                        
+                                                        if is_selected {
+                                                            ui.label(egui::RichText::new("当前").size(12.0).color(egui::Color32::from_rgb(19, 78, 74)).strong());
+                                                        }
+                                                    });
+                                                    ui.add_space(4.0);
+                                                });
+                                                ui.add_space(12.0); // 增加项之间的间距
+                                            }
+                                        });
+                                    });
+                            });
+                    });
                     } else {
                         ui.vertical_centered(|ui| {
                             ui.add_space(100.0);
@@ -782,7 +1214,6 @@ impl eframe::App for BatchImageSplitterApp {
                         });
                     }
                 });
-            });
         
         // 关于窗口
         if self.show_about {
