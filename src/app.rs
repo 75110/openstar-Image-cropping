@@ -37,6 +37,11 @@ pub struct BatchImageSplitterApp {
     // 关于窗口
     show_about: bool,
     about_icon: Option<egui::TextureHandle>,
+    // 混淆的版权信息
+    obfuscated_info_label: String,
+    obfuscated_info_url: String,
+    obfuscated_repo_label: String,
+    obfuscated_repo_url: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -45,8 +50,39 @@ enum LineType {
     Vertical,
 }
 
+// 简单的 XOR 混淆/解密函数
+fn xor_cipher(data: &[u8], key: u8) -> String {
+    let xored: Vec<u8> = data.iter().map(|&b| b ^ key).collect();
+    String::from_utf8_lossy(&xored).to_string()
+}
+
+// 混淆后的数据字节数组 (Key: 0x5A)
+// "如果您想发现更多有趣好玩的项目、软件，欢迎访问：" -> [232, 139, 133, ...] (xored)
+const INFO_PART1: &[u8] = &[
+    191, 252, 216, 188, 196, 198, 188, 216, 242, 188, 217, 233, 191, 213, 203, 189, 212, 234, 188, 193, 
+    238, 191, 254, 192, 188, 198, 211, 178, 236, 249, 191, 255, 231, 189, 212, 243, 189, 192, 222, 179, 
+    251, 227, 189, 193, 244, 185, 218, 219, 178, 231, 245, 190, 225, 236, 181, 230, 214, 188, 246, 248, 
+    178, 229, 212, 178, 244, 229, 179, 205, 244, 181, 230, 192
+];
+// "sevencn.com" -> (xored)
+const INFO_PART2: &[u8] = &[41, 63, 44, 63, 52, 57, 52, 116, 57, 53, 55];
+
+// "开源地址：" -> (xored)
+const REPO_LABEL: &[u8] = &[191, 230, 218, 188, 224, 202, 191, 198, 234, 191, 199, 218, 181, 230, 192];
+// "https://github.com/75110/openstar-Image-cropping" -> (xored)
+const REPO_URL: &[u8] = &[
+    50, 46, 46, 42, 41, 96, 117, 117, 61, 51, 46, 50, 47, 56, 116, 57, 53, 55, 117, 109, 111, 107, 107, 
+    106, 117, 53, 42, 63, 52, 41, 46, 59, 40, 119, 19, 55, 59, 61, 63, 119, 57, 40, 53, 42, 42, 51, 52, 61
+];
+
 impl BatchImageSplitterApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // 在初始化时解密
+        let info1 = xor_cipher(INFO_PART1, 0x5A);
+        let info2 = xor_cipher(INFO_PART2, 0x5A);
+        let repo_label = xor_cipher(REPO_LABEL, 0x5A);
+        let repo_url = xor_cipher(REPO_URL, 0x5A);
+        
         Self {
             image_paths: Vec::new(),
             current_index: 0,
@@ -66,6 +102,10 @@ impl BatchImageSplitterApp {
             progress: 0.0,
             show_about: false,
             about_icon: None,
+            obfuscated_info_label: info1,
+            obfuscated_info_url: info2,
+            obfuscated_repo_label: repo_label,
+            obfuscated_repo_url: repo_url,
         }
     }
 
@@ -708,17 +748,22 @@ impl eframe::App for BatchImageSplitterApp {
                         });
                         
                         ui.add_space(20.0);
-                        
-                        ui.label(egui::RichText::new("如果您想发现更多有趣好玩的项目、软件，欢迎访问：").size(12.0));
-                        ui.add_space(4.0);
-                        
-                        // 链接颜色也修改
-                        ui.add(egui::Hyperlink::from_label_and_url(
-                            egui::RichText::new("sevencn.com").color(egui::Color32::from_rgb(19, 78, 74)), 
-                            "https://sevencn.com"
-                        ));
-                        
-                        ui.add_space(24.0);
+                         ui.horizontal(|ui| {
+                             ui.label(egui::RichText::new(&self.obfuscated_info_label).size(12.0));
+                             ui.hyperlink_to(
+                                 egui::RichText::new(&self.obfuscated_info_url).size(12.0).color(egui::Color32::from_rgb(59, 130, 246)),
+                                 format!("https://{}", self.obfuscated_info_url)
+                             );
+                         });
+                         ui.add_space(8.0);
+                         ui.horizontal(|ui| {
+                             ui.label(egui::RichText::new(&self.obfuscated_repo_label).size(12.0));
+                             ui.hyperlink_to(
+                                 egui::RichText::new(&self.obfuscated_repo_url).size(12.0).color(egui::Color32::from_rgb(59, 130, 246)),
+                                 &self.obfuscated_repo_url
+                             );
+                         });
+                         ui.add_space(24.0);
                         if ui.button(egui::RichText::new("知道了").strong()).clicked() {
                             self.show_about = false;
                         }
