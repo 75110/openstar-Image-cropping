@@ -1254,7 +1254,7 @@ impl eframe::App for BatchImageSplitterApp {
                         }
                         ui.add_space(16.0);
                         ui.label(egui::RichText::new("批量图片分割工具").size(22.0).strong().color(egui::Color32::from_rgb(19, 78, 74))); // #134e4a
-                        ui.label(egui::RichText::new("v1.2").size(13.0).color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(13.0).color(egui::Color32::GRAY));
                         ui.add_space(20.0);
                         
                         // 自定义颜色的分割线
