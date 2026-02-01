@@ -8,7 +8,19 @@ use app::BatchImageSplitterApp;
 
 /// 加载图标
 fn load_icon() -> Option<egui::IconData> {
-    // 优先级：icon.ico > LOGO.png
+    // 优先使用嵌入的图标数据
+    let icon_data = include_bytes!("../icon.ico");
+    if let Ok(image) = image::load_from_memory(icon_data) {
+        let image = image.to_rgba8();
+        let (width, height) = image.dimensions();
+        return Some(egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        });
+    }
+    
+    // 如果嵌入失败（不应该发生），尝试从文件加载
     let icon_names = ["icon.ico", "LOGO.png"];
     let mut search_dirs = vec![
         std::env::current_dir().unwrap_or_default(),
@@ -89,32 +101,21 @@ fn main() -> eframe::Result<()> {
                 }
             }
             
-            // 加载图标字体（体积小，同步加载）
-            let icon_font_paths = [
-                std::path::PathBuf::from("MaterialIcons-Regular.ttf"),
-                std::env::current_dir().map(|p| p.join("MaterialIcons-Regular.ttf")).unwrap_or_default(),
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|p| p.join("MaterialIcons-Regular.ttf")))
-                    .unwrap_or_default(),
-            ];
+            // 加载图标字体（直接嵌入到二进制文件中，确保便携性）
+            let icon_font_data = include_bytes!("../MaterialIcons-Regular.ttf");
+            fonts.font_data.insert(
+                "material_icons".to_owned(),
+                egui::FontData::from_static(icon_font_data),
+            );
             
-            for path in &icon_font_paths {
-                if path.exists() {
-                    if let Ok(data) = std::fs::read(path) {
-                        fonts.font_data.insert("material_icons".to_owned(), egui::FontData::from_owned(data));
-                        // 插入到 Proportional 和 Monospace 家族
-                        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                            let family_fonts = fonts.families.entry(family).or_default();
-                            // 紧跟在中文字体后面，或者放在第一位
-                            if family_fonts.contains(&"chinese".to_owned()) {
-                                family_fonts.insert(1, "material_icons".to_owned());
-                            } else {
-                                family_fonts.insert(0, "material_icons".to_owned());
-                            }
-                        }
-                        break;
-                    }
+            // 插入到 Proportional 和 Monospace 家族
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                let family_fonts = fonts.families.entry(family).or_default();
+                // 紧跟在中文字体后面，或者放在第一位
+                if family_fonts.contains(&"chinese".to_owned()) {
+                    family_fonts.insert(1, "material_icons".to_owned());
+                } else {
+                    family_fonts.insert(0, "material_icons".to_owned());
                 }
             }
             

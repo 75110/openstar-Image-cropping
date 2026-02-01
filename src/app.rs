@@ -283,7 +283,25 @@ impl BatchImageSplitterApp {
 
     fn load_about_icon(&mut self, ctx: &egui::Context) {
         if self.about_icon.is_none() {
-            // 尝试多个可能的图标路径
+            // 优先使用嵌入的图标数据
+            let icon_data = include_bytes!("../icon.ico");
+            if let Ok(img) = image::load_from_memory(icon_data) {
+                let size = [img.width() as usize, img.height() as usize];
+                let rgba = img.to_rgba8();
+                let pixels = rgba.as_raw();
+                
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels);
+                let texture = ctx.load_texture(
+                    "about_icon",
+                    color_image,
+                    egui::TextureOptions::default(),
+                );
+                
+                self.about_icon = Some(texture);
+                return;
+            }
+
+            // 备选方案：尝试从文件加载
             let icon_names = ["icon.ico", "LOGO.png"];
             let mut search_dirs = vec![PathBuf::from(".")];
             if let Ok(exe_path) = std::env::current_exe() {
